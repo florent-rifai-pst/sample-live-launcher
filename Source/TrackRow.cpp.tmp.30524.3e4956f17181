@@ -1,0 +1,145 @@
+#include "TrackRow.h"
+
+//==============================================================================
+std::vector<int> TrackRow::parseChannels (const juce::String& text)
+{
+    std::vector<int> result;
+    auto tokens = juce::StringArray::fromTokens (text, " ,;-", "");
+    for (auto& tok : tokens)
+    {
+        auto trimmed = tok.trim();
+        if (trimmed.isEmpty())
+            continue;
+        const int oneBased = trimmed.getIntValue();
+        if (oneBased >= 1)
+            result.push_back (oneBased - 1);
+    }
+    return result;
+}
+
+juce::String TrackRow::channelsToText (const std::vector<int>& chans0Based)
+{
+    juce::StringArray parts;
+    for (int c : chans0Based)
+        parts.add (juce::String (c + 1));
+    return parts.joinIntoString (",");
+}
+
+//==============================================================================
+TrackRow::TrackRow (const juce::String& name, const std::vector<int>& outChannels0Based, float gain)
+{
+    addAndMakeVisible (gripLabel);
+    gripLabel.setJustificationType (juce::Justification::centred);
+    gripLabel.setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.5f));
+    gripLabel.setTooltip ("Glisser pour réordonner"_t);
+    gripLabel.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    gripLabel.addMouseListener (this, false);   // forward grip drags to TrackRow::mouseDrag
+
+    addAndMakeVisible (nameLabel);
+    nameLabel.setText (name, juce::dontSendNotification);
+    nameLabel.setJustificationType (juce::Justification::centredLeft);
+
+    addAndMakeVisible (chanCaption);
+    chanCaption.setJustificationType (juce::Justification::centredRight);
+
+    addAndMakeVisible (chanEditor);
+    chanEditor.setText (channelsToText (outChannels0Based), false);
+    chanEditor.setTooltip ("Sorties physiques, ex: 1,2 (facade) ou 3,4 (clic)");
+    chanEditor.onReturnKey  = [this] { commitChannels(); };
+    chanEditor.onFocusLost  = [this] { commitChannels(); };
+
+    addAndMakeVisible (gainSlider);
+    gainSlider.setRange (0.0, 1.5, 0.01);
+    gainSlider.setValue (gain, juce::dontSendNotification);
+    gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    gainSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, 20);
+    gainSlider.onValueChange = [this]
+    {
+        if (onGainChanged)
+            onGainChanged (this, (float) gainSlider.getValue());
+    };
+
+    addAndMakeVisible (upButton);
+    upButton.onClick = [this] { if (onMove) onMove (this, -1); };
+
+    addAndMakeVisible (downButton);
+    downButton.onClick = [this] { if (onMove) onMove (this, 1); };
+
+    addAndMakeVisible (removeButton);
+    removeButton.onClick = [this] { if (onRemove) onRemove (this); };
+}
+
+void TrackRow::commitChannels()
+{
+    if (onChannelsChanged)
+        onChannelsChanged (this, parseChannels (chanEditor.getText()));
+}
+
+//==============================================================================
+void TrackRow::mouseDrag (const juce::MouseEvent& e)
+{
+    // Only the grip starts a drag.
+    if (e.eventComponent != &gripLabel)
+        return;
+
+    if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
+        if (! container->isDragAndDropActive())
+            container->startDragging (index, this);
+}
+
+bool TrackRow::isInterestedInDragSource (const SourceDetails& d)
+{
+    return dynamic_cast<TrackRow*> (d.sourceComponent.get()) != nullptr;
+}
+
+void TrackRow::itemDragEnter (const SourceDetails&)
+{
+    dragOver = true;
+    repaint();
+}
+
+void TrackRow::itemDragExit (const SourceDetails&)
+{
+    dragOver = false;
+    repaint();
+}
+
+void TrackRow::itemDropped (const SourceDetails& d)
+{
+    dragOver = false;
+    repaint();
+
+    const int from = (int) d.description;
+    if (onReorder && from != index)
+        onReorder (from, index);
+}
+
+void TrackRow::paint (juce::Graphics& g)
+{
+    g.setColour (juce::Colours::white.withAlpha (0.06f));
+    g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (1.0f), 4.0f);
+
+    if (dragOver)
+    {
+        g.setColour (juce::Colours::cornflowerblue);
+        g.drawLine (0.0f, 1.0f, (float) getWidth(), 1.0f, 2.0f);
+    }
+}
+
+void TrackRow::resized()
+{
+    auto r = getLocalBounds().reduced (6, 4);
+    gripLabel.setBounds (r.removeFromLeft (22));
+    r.removeFromLeft (4);
+    removeButton.setBounds (r.removeFromRight (32));
+    r.removeFromRight (6);
+    downButton.setBounds (r.removeFromRight (28));
+    r.removeFromRight (2);
+    upButton.setBounds (r.removeFromRight (28));
+    r.removeFromRight (6);
+    gainSlider.setBounds (r.removeFromRight (180));
+    r.removeFromRight (6);
+    chanEditor.setBounds (r.removeFromRight (90));
+    chanCaption.setBounds (r.removeFromRight (60));
+    nameLabel.setBounds (r);
+}

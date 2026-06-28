@@ -6,10 +6,12 @@ SetlistsView::SetlistsView (Library& lib, AudioEngine& eng)
 {
     // Left: setlist list -------------------------------------------------------
     setlistModel.getCount = [this] { return (int) library.setlists.size(); };
-    setlistModel.getText  = [this] (int row)
+    setlistModel.getText  = [this] (int row) -> juce::String
     {
-        return juce::isPositiveAndBelow (row, (int) library.setlists.size())
-                   ? library.setlists[(size_t) row].name : juce::String();
+        if (! juce::isPositiveAndBelow (row, (int) library.setlists.size()))
+            return {};
+        auto& sl = library.setlists[(size_t) row];
+        return sl.name + "  (" + formatDuration (setlistDurationSeconds (library, sl)) + ")";
     };
     setlistModel.onSelect = [this] (int row) { selectSetlist (row); };
 
@@ -51,15 +53,35 @@ SetlistsView::SetlistsView (Library& lib, AudioEngine& eng)
     {
         auto* s = currentSetlist();
         if (s != nullptr && juce::isPositiveAndBelow (row, s->songIds.size()))
-            return juce::String (row + 1) + ". " + songNameFor (s->songIds[row]);
+        {
+            const auto id = s->songIds[row];
+            juce::String dur = "--:--";
+            if (auto* song = library.findSong (id))
+                dur = formatDuration (songDurationSeconds (*song));
+            return juce::String (row + 1) + ". " + songNameFor (id) + "  (" + dur + ")";
+        }
         return {};
     };
     inListModel.onSelect = [this] (int row) { inListSel = row; };
+    inListModel.draggable = true;
 
     addAndMakeVisible (inListCaption);
     addAndMakeVisible (inListList);
     inListList.setModel (&inListModel);
     inListList.setRowHeight (28);
+    inListList.onReorder = [this] (int from, int to)
+    {
+        auto* s = currentSetlist();
+        if (s == nullptr || ! juce::isPositiveAndBelow (from, s->songIds.size()))
+            return;
+
+        const int ins = juce::jlimit (0, s->songIds.size() - 1, from < to ? to - 1 : to);
+        s->songIds.move (from, ins);
+        inListSel = ins;
+        notifyChanged();
+        inListList.updateContent();
+        inListList.selectRow (ins);
+    };
 
     addAndMakeVisible (upBtn);
     upBtn.onClick = [this] { moveSelectedSong (-1); };
@@ -86,6 +108,10 @@ SetlistsView::SetlistsView (Library& lib, AudioEngine& eng)
     addAndMakeVisible (addBtn);
     addBtn.onClick = [this] { addSelectedSong(); };
 
+    addAndMakeVisible (saveBtn);
+    saveBtn.onClick = [this] { save(); };
+    saveBtn.setEnabled (false);
+
     refresh();
 }
 
@@ -107,9 +133,21 @@ juce::String SetlistsView::songNameFor (const juce::String& id) const
 
 void SetlistsView::notifyChanged()
 {
-    library.save();
+    setDirty (true);
     if (onLibraryChanged)
         onLibraryChanged();
+}
+
+void SetlistsView::setDirty (bool d)
+{
+    dirty = d;
+    saveBtn.setEnabled (d);
+}
+
+void SetlistsView::save()
+{
+    library.save();
+    setDirty (false);
 }
 
 //==============================================================================
@@ -125,14 +163,37 @@ void SetlistsView::newSetlist()
 
 void SetlistsView::deleteSetlist()
 {
-    if (currentSetlist() != nullptr)
+    auto* s = currentSetlist();
+    if (s == nullptr)
+        return;
+
+    const auto id   = s->id;
+    const auto name = s->name;
+
+    auto options = juce::MessageBoxOptions()
+                       .withIconType (juce::MessageBoxIconType::WarningIcon)
+                       .withTitle ("Supprimer la setlist"_t)
+                       .withMessage ("Supprimer la setlist \"" + name + "\" ?")
+                       .withButton ("Supprimer")
+                       .withButton ("Annuler");
+
+    juce::AlertWindow::showAsync (options, [this, id] (int result)
     {
-        library.setlists.erase (library.setlists.begin() + selected);
+        if (result != 1)   // 1 = Supprimer (1er bouton) ; 0 = Annuler / Echap
+            return;
+
+        for (size_t i = 0; i < library.setlists.size(); ++i)
+            if (library.setlists[i].id == id)
+            {
+                library.setlists.erase (library.setlists.begin() + (long) i);
+                break;
+            }
+
         selected = -1;
         notifyChanged();
         setlistList.updateContent();
         refresh();
-    }
+    });
 }
 
 void SetlistsView::selectSetlist (int index)
@@ -143,7 +204,9 @@ void SetlistsView::selectSetlist (int index)
     if (auto* s = currentSetlist())
     {
         nameEditor.setText (s->name, juce::dontSendNotification);
-        editorTitle.setText ("Setlist: " + s->name, juce::dontSendNotification);
+        editorTitle.setText ("Setlist: " + s->name
+                                 + "  (" + formatDuration (setlistDurationSeconds (library, *s)) + ")",
+                             juce::dontSendNotification);
     }
     else
     {
@@ -240,6 +303,8 @@ void SetlistsView::resized()
     auto nameRow = right.removeFromTop (28);
     nameCaption.setBounds (nameRow.removeFromLeft (50));
     nameEditor.setBounds (nameRow.removeFromLeft (300));
+    nameRow.removeFromLeft (12);
+    saveBtn.setBounds (nameRow.removeFromLeft (130));
     right.removeFromTop (12);
 
     // Two columns: songs-in-setlist (with reorder buttons) | library (with add)

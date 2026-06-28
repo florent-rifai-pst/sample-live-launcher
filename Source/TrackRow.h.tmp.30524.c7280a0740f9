@@ -11,22 +11,18 @@ class TrackRow  : public juce::Component,
                   public juce::DragAndDropTarget
 {
 public:
-    TrackRow (const juce::String& name, const std::vector<int>& outChannels0Based,
-              float gain, bool mute, bool solo);
+    TrackRow (const juce::String& name, const std::vector<int>& outChannels0Based, float gain);
 
     void resized() override;
     void paint (juce::Graphics&) override;
     void mouseDrag (const juce::MouseEvent&) override;
 
     void setIndex (int i)  { index = i; }
-    void setLevel (float linearPeak);   // feed the real-time meter (0..~1)
-    void setNumOutputs (int n) { numOutputs = juce::jmax (1, n); }   // for the picker
 
     std::function<void (TrackRow*)>                    onRemove;
     std::function<void (TrackRow*, std::vector<int>)>  onChannelsChanged;
     std::function<void (TrackRow*, float)>             onGainChanged;
-    std::function<void (TrackRow*, bool)>              onMuteChanged;
-    std::function<void (TrackRow*, bool)>              onSoloChanged;
+    std::function<void (TrackRow*, int)>               onMove;       // delta: -1 up, +1 down
     std::function<void (int from, int to)>             onReorder;    // drag'n'drop reorder
 
     //== DragAndDropTarget ====================================================
@@ -39,22 +35,18 @@ public:
     static juce::String      channelsToText (const std::vector<int>& chans0Based);
 
 private:
-    void openOutputSelector();
-    void updateChanButtonText();
+    void commitChannels();
 
-    int   index      = 0;
-    bool  dragOver   = false;
-    int   numOutputs = 2;           // available physical outputs (for the picker)
-    float level      = 0.0f;        // smoothed meter value, 0..1
-    std::vector<int> channels;      // current outputs (0-based)
-    juce::Rectangle<int> meterBounds;
+    int  index    = 0;
+    bool dragOver = false;
 
     juce::Label      gripLabel    { {}, juce::String::fromUTF8 ("\xe2\x89\xa1") };  // drag handle
     juce::Label      nameLabel;
-    juce::TextButton chanButton;    // opens the output picker
-    juce::TextButton muteButton   { "M" };
-    juce::TextButton soloButton   { "S" };
+    juce::Label      chanCaption  { {}, "Sorties:" };
+    juce::TextEditor chanEditor;
     juce::Slider     gainSlider;
+    juce::TextButton upButton     { juce::String::fromUTF8 ("\xe2\x86\x91") };   // up arrow
+    juce::TextButton downButton   { juce::String::fromUTF8 ("\xe2\x86\x93") };   // down arrow
     juce::TextButton removeButton { "X" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackRow)

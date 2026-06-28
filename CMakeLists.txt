@@ -10,7 +10,8 @@ add_subdirectory(libs/JUCE)
 
 juce_add_gui_app(SampleLiveLauncher
     PRODUCT_NAME "Sample Live Launcher"
-    COMPANY_NAME "MidnightTheory")
+    COMPANY_NAME "MidnightTheory"
+    ICON_BIG "Resources/AppIcon.png")
 
 juce_generate_juce_header(SampleLiveLauncher)
 
@@ -20,6 +21,8 @@ target_sources(SampleLiveLauncher PRIVATE
     Source/AudioEngine.cpp
     Source/Models.cpp
     Source/TrackRow.cpp
+    Source/ClickTrackPanel.cpp
+    Source/SoundBankView.cpp
     Source/SongsView.cpp
     Source/SetlistsView.cpp
     Source/LiveView.cpp)

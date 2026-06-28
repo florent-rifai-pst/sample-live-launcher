@@ -28,6 +28,11 @@ MainComponent::MainComponent()
         songsView.refresh();
         liveView.refresh();
     };
+    settingsView.onChange = [this]
+    {
+        library.save();
+        songsView.refresh();   // refresh the per-song bank pickers
+    };
 
     addAndMakeVisible (tabs);
     auto bg = getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId);
@@ -39,6 +44,7 @@ MainComponent::MainComponent()
     songsView.refresh();
     setlistsView.refresh();
     liveView.refresh();
+    settingsView.refresh();
 
     setSize (920, 740);
 

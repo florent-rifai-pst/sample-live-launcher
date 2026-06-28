@@ -6,22 +6,37 @@
 #include "SongsView.h"
 #include "SetlistsView.h"
 #include "LiveView.h"
+#include "SoundBankView.h"
 
 //==============================================================================
-// Wraps the audio device selector so it can live in a tab.
+// Réglages tab: audio device selector on top, click sound bank manager below.
 class SettingsView  : public juce::Component
 {
 public:
-    explicit SettingsView (juce::AudioDeviceManager& dm)
-        : selector (dm, 0, 0, 2, 256, false, false, false, false)
+    SettingsView (juce::AudioDeviceManager& dm, Library& library)
+        : selector (dm, 0, 0, 2, 256, false, false, false, false),
+          banks (library)
     {
         addAndMakeVisible (selector);
+        addAndMakeVisible (banks);
+        banks.onChange = [this] { if (onChange) onChange(); };
     }
 
-    void resized() override { selector.setBounds (getLocalBounds().reduced (10)); }
+    void refresh() { banks.refresh(); }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (10);
+        banks.setBounds (area.removeFromBottom (230));
+        area.removeFromBottom (10);
+        selector.setBounds (area);
+    }
+
+    std::function<void()> onChange;   // a sound bank was edited
 
 private:
     juce::AudioDeviceSelectorComponent selector;
+    SoundBankView                      banks;
 };
 
 //==============================================================================
@@ -49,7 +64,7 @@ private:
     SongsView    songsView    { library, engine };
     SetlistsView setlistsView { library, engine };
     LiveView     liveView     { library, engine };
-    SettingsView settingsView { deviceManager };
+    SettingsView settingsView { deviceManager, library };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };
