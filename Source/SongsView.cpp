@@ -36,7 +36,21 @@ SongsView::SongsView (Library& lib, AudioEngine& eng)
     nameEditor.onFocusLost  = [this] { refresh(); };
 
     addAndMakeVisible (addFilesBtn);
+    addFilesBtn.setTooltip ("Ajouter fichier(s)"_t);
     addFilesBtn.onClick = [this] { addFiles(); };
+
+    addAndMakeVisible (clickToggleBtn);
+    clickToggleBtn.setTooltip ("Afficher / masquer la piste click"_t);
+    clickToggleBtn.onClick = [this]
+    {
+        const bool show = ! clickPanel.isVisible();
+        clickPanel.setVisible (show);
+        if (show)
+            clickPanel.setExpanded (true);   // reveal sections immediately
+        clickToggleBtn.highlighted = show;
+        clickToggleBtn.repaint();
+        resized();
+    };
 
     addAndMakeVisible (playPauseBtn);
     playPauseBtn.onClick = [this]
@@ -69,6 +83,7 @@ SongsView::SongsView (Library& lib, AudioEngine& eng)
     };
 
     addAndMakeVisible (saveBtn);
+    saveBtn.setTooltip ("Sauvegarder"_t);
     saveBtn.onClick = [this] { save(); };
     saveBtn.setEnabled (false);
 
@@ -76,6 +91,15 @@ SongsView::SongsView (Library& lib, AudioEngine& eng)
     revertBtn.onClick = [this] { revert(); };
     revertBtn.setTooltip ("Rétablir"_t);
     revertBtn.setEnabled (false);
+
+    addAndMakeVisible (seqBtn);
+    seqBtn.setTooltip ("Ouvrir le s\xc3\xa9quenceur"_t);
+    seqBtn.onClick = [this] { openSequencer(); };
+    seqBtn.setEnabled (false);
+
+    addChildComponent (sequencer);               // hidden until openSequencer()
+    sequencer.onClose  = [this] { closeSequencer(); };
+    sequencer.onChange = [this] { notifyChanged(); };
 
     addAndMakeVisible (positionSlider);
     positionSlider.setRange (0.0, 1.0, 0.01);
@@ -94,7 +118,7 @@ SongsView::SongsView (Library& lib, AudioEngine& eng)
     tracksViewport.setViewedComponent (&tracksHolder, false);
     tracksViewport.setScrollBarsShown (true, false);
 
-    tracksHolder.addAndMakeVisible (clickPanel);
+    tracksHolder.addChildComponent (clickPanel);   // hidden until the metronome button
     clickPanel.onChange = [this]
     {
         if (auto* s = currentSong())
@@ -265,6 +289,7 @@ void SongsView::selectSong (int index)
     nameEditor.setEnabled (has);
     addFilesBtn.setEnabled (has);
     playPauseBtn.setEnabled (has);
+    seqBtn.setEnabled (has);
     positionSlider.setEnabled (has);
     updateTimeLabel();
     updatePlayIcon();
@@ -314,18 +339,29 @@ void SongsView::rebuildTrackRows()
         int trackIndex = 0;
         for (auto& td : s->tracks)
         {
-            auto* row = new TrackRow (td.name, td.channels, td.gain, td.mute, td.solo);
+            auto* row = new TrackRow (td.name, td.channels, td.channelGains, td.gain, td.mute, td.solo);
             row->setIndex (trackIndex++);
             row->setNumOutputs (engine.getNumOutputChannels());
+            row->onLayoutChanged = [this] { resized(); };
 
             row->onRemove = [this] (TrackRow* r)
             {
                 const int idx = rows.indexOf (r);
                 if (auto* song = currentSong(); song != nullptr && idx >= 0)
                 {
-                    song->tracks.erase (song->tracks.begin() + idx);
-                    notifyChanged();
-                    rebuildTrackRows();
+                    // Defer: rebuildTrackRows() deletes the row (and the button firing
+                    // this callback) -> use-after-free if done inline.
+                    const juce::String songId = song->id;
+                    juce::MessageManager::callAsync ([this, songId, idx]
+                    {
+                        if (auto* s = currentSong(); s != nullptr && s->id == songId
+                                && juce::isPositiveAndBelow (idx, (int) s->tracks.size()))
+                        {
+                            s->tracks.erase (s->tracks.begin() + idx);
+                            notifyChanged();
+                            rebuildTrackRows();
+                        }
+                    });
                 }
             };
             row->onChannelsChanged = [this] (TrackRow* r, std::vector<int> chans)
@@ -336,6 +372,17 @@ void SongsView::rebuildTrackRows()
                     song->tracks[(size_t) idx].channels = chans;
                     if (loadedSongId == song->id)            // apply live (even while playing)
                         engine.setTrackChannels (idx, std::move (chans));
+                    notifyChanged();
+                }
+            };
+            row->onChannelGainsChanged = [this] (TrackRow* r, std::vector<float> gains)
+            {
+                const int idx = rows.indexOf (r);
+                if (auto* song = currentSong(); song != nullptr && idx >= 0)
+                {
+                    song->tracks[(size_t) idx].channelGains = gains;
+                    if (loadedSongId == song->id)            // apply live (even while playing)
+                        engine.setTrackChannelGains (idx, std::move (gains));
                     notifyChanged();
                 }
             };
@@ -395,6 +442,38 @@ void SongsView::rebuildTrackRows()
     }
 
     resized();
+}
+
+//==============================================================================
+void SongsView::openSequencer()
+{
+    auto* s = currentSong();
+    if (s == nullptr)
+        return;
+
+    // Make sure the song is the one loaded in the engine (reflects latest edits),
+    // then hand it to the sequencer. Reuse the existing position if already loaded.
+    auto cf = clickBankFiles (*s);
+    if (loadedSongId != s->id || engine.getNumTracks() == 0)
+    {
+        engine.loadSong (*s, cf.first, cf.second);
+        loadedSongId = s->id;
+    }
+
+    sequencer.setSong (s, cf.first, cf.second);
+    sequencer.setVisible (true);
+    sequencer.toFront (false);
+    resized();
+}
+
+void SongsView::closeSequencer()
+{
+    engine.pauseAll();
+    engine.setLoop (false);                      // don't leave the play bar looping
+    sequencer.setSong (nullptr, {}, {});
+    sequencer.setVisible (false);
+    updatePlayIcon();
+    refresh();                                   // editor may reflect click edits
 }
 
 //==============================================================================
@@ -471,6 +550,12 @@ void SongsView::refresh()
 
 void SongsView::resized()
 {
+    if (sequencer.isVisible())                    // inline sequencer takes the whole view
+    {
+        sequencer.setBounds (getLocalBounds());
+        return;
+    }
+
     auto area = getLocalBounds().reduced (10);
 
     // Left: song list + buttons
@@ -495,13 +580,16 @@ void SongsView::resized()
     right.removeFromTop (8);
 
     auto btnRow = right.removeFromTop (36);
-    addFilesBtn.setBounds (btnRow.removeFromLeft (200));
-    btnRow.removeFromLeft (10);
+    addFilesBtn.setBounds (btnRow.removeFromLeft (40));
+    btnRow.removeFromLeft (6);
+    clickToggleBtn.setBounds (btnRow.removeFromLeft (40));
+    btnRow.removeFromLeft (16);
     playPauseBtn.setBounds (btnRow.removeFromLeft (44));
     btnRow.removeFromLeft (6);
-    saveBtn.setBounds (btnRow.removeFromLeft (130));
+    saveBtn.setBounds (btnRow.removeFromLeft (40));
     btnRow.removeFromLeft (6);
     revertBtn.setBounds (btnRow.removeFromLeft (36));
+    seqBtn.setBounds (btnRow.removeFromRight (110));
     right.removeFromTop (8);
 
     // Play bar: seekable position slider + time readout
@@ -513,19 +601,26 @@ void SongsView::resized()
 
     tracksViewport.setBounds (right);
 
-    const int rowH      = 44;
-    const int clickH    = clickPanel.preferredHeight();
-    const int width     = tracksViewport.getMaximumVisibleWidth();
-    const int contentH  = clickH + 6 + (int) rows.size() * rowH;
+    const int width  = tracksViewport.getMaximumVisibleWidth();
+    const int clickH = clickPanel.isVisible() ? clickPanel.preferredHeight() : 0;
+
+    int contentH = clickH > 0 ? clickH + 6 : 0;
+    for (auto* r : rows)
+        contentH += r->getPreferredHeight() + 4;
 
     tracksHolder.setSize (width, juce::jmax (right.getHeight(), contentH));
 
-    clickPanel.setBounds (0, 0, width, clickH);
+    int y = 0;
+    if (clickPanel.isVisible())
+    {
+        clickPanel.setBounds (0, 0, width, clickH);
+        y = clickH + 6;
+    }
 
-    int y = clickH + 6;
     for (auto* r : rows)
     {
-        r->setBounds (0, y, tracksHolder.getWidth(), rowH - 4);
-        y += rowH;
+        const int h = r->getPreferredHeight();
+        r->setBounds (0, y, width, h);
+        y += h + 4;
     }
 }

@@ -8,13 +8,14 @@
 
 struct TrackData
 {
-    juce::String     name;
-    juce::String     filePath;
-    std::vector<int> channels { 0, 1 };   // 0-based physical output indices
-    float            gain = 1.0f;
-    bool             mute = false;
-    bool             solo = false;
-    double           durationSeconds = 0.0;   // cached length of the audio file
+    juce::String       name;
+    juce::String       filePath;
+    std::vector<int>   channels { 0, 1 };   // 0-based physical output indices
+    std::vector<float> channelGains;        // per-output gain, aligned with channels (1.0 default)
+    float              gain = 1.0f;         // global track gain (0..3)
+    bool               mute = false;
+    bool               solo = false;
+    double             durationSeconds = 0.0;   // cached length of the audio file
 };
 
 // One brick of the click track: bars [barFrom..barTo] (1-based, inclusive) play
@@ -61,6 +62,13 @@ struct Song
 
 // Total length of a click track in seconds (sum of all bricks' bar durations).
 double clickTrackDurationSeconds (const ClickTrack& click);
+
+// Tempo map for the sequencer: cumulative time (seconds) at every bar boundary,
+// laying the bricks end to end (sorted by barFrom). Size = totalBars + 1, with
+// [0] = 0.0 and back() = total length. Built from segments regardless of the
+// enabled flag, so the bar grid shows even when the click is muted.
+std::vector<double> clickBarBoundaries (const ClickTrack& click);
+int                 clickTotalBars     (const ClickTrack& click);   // = boundaries - 1
 
 struct Setlist
 {

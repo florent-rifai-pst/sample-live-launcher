@@ -60,6 +60,7 @@ private:
     juce::AudioFormatManager formatManager;
     AudioEngine              engine;
 
+    juce::TooltipWindow   tooltipWindow { this, 600 };   // shows icon-button tooltips
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     SongsView    songsView    { library, engine };
     SetlistsView setlistsView { library, engine };

@@ -27,6 +27,7 @@ void AudioEngine::loadSong (const Song& song, const juce::File& clickAccent, con
         if (idx >= 0)
         {
             setTrackChannels (idx, td.channels);
+            setTrackChannelGains (idx, td.channelGains);
             setTrackGain (idx, td.gain);
             setTrackMute (idx, td.mute);
             setTrackSolo (idx, td.solo);
@@ -79,7 +80,20 @@ void AudioEngine::setTrackChannels (int index, std::vector<int> channels)
 {
     const juce::ScopedLock sl (lock);
     if (auto* t = getTrack (index))
+    {
         t->outChannels = std::move (channels);
+        t->outGains.resize (t->outChannels.size(), 1.0f);   // keep per-output gains aligned
+    }
+}
+
+void AudioEngine::setTrackChannelGains (int index, std::vector<float> gains)
+{
+    const juce::ScopedLock sl (lock);
+    if (auto* t = getTrack (index))
+    {
+        t->outGains = std::move (gains);
+        t->outGains.resize (t->outChannels.size(), 1.0f);
+    }
 }
 
 void AudioEngine::setTrackGain (int index, float gain)
@@ -132,6 +146,25 @@ void AudioEngine::loadClickSample (const juce::File& f, juce::AudioBuffer<float>
     destRate = r->sampleRate > 0.0 ? r->sampleRate : currentSampleRate;
 }
 
+// Procedurally generated default click (used when no sound bank file is set), so
+// the default uses the exact same sample-playback path as a real bank.
+void AudioEngine::makeDefaultClick (juce::AudioBuffer<float>& dest, bool accent)
+{
+    const double sr   = currentSampleRate > 0.0 ? currentSampleRate : 44100.0;
+    const int    len  = juce::jmax (1, (int) (0.045 * sr));     // 45 ms
+    const double freq = accent ? 1760.0 : 1175.0;
+    const double inc  = juce::MathConstants<double>::twoPi * freq / sr;
+    const float  amp  = accent ? 0.9f : 0.7f;
+
+    dest.setSize (1, len);
+    float* d = dest.getWritePointer (0);
+    for (int i = 0; i < len; ++i)
+    {
+        const float env = std::exp (-5.0f * (float) i / (float) len);   // fast decay
+        d[i] = (float) std::sin (inc * i) * env * amp;
+    }
+}
+
 void AudioEngine::setClick (const ClickTrack& click, const juce::File& accentFile, const juce::File& normalFile)
 {
     // Decode outside the lock.
@@ -140,12 +173,16 @@ void AudioEngine::setClick (const ClickTrack& click, const juce::File& accentFil
     loadClickSample (accentFile, aBuf, aRate);
     loadClickSample (normalFile, nBuf, nRate);
 
+    // Fall back to the built-in beep for any beat without a sample file.
+    if (aBuf.getNumSamples() == 0) { makeDefaultClick (aBuf, true);  aRate = currentSampleRate; }
+    if (nBuf.getNumSamples() == 0) { makeDefaultClick (nBuf, false); nRate = currentSampleRate; }
+
     const juce::ScopedLock sl (lock);
     clickConfig = click;
 
     clickAccentBuf  = std::move (aBuf);  clickAccentRate = aRate;
     clickNormalBuf  = std::move (nBuf);  clickNormalRate = nRate;
-    clickUseSamples = clickAccentBuf.getNumSamples() > 0 || clickNormalBuf.getNumSamples() > 0;
+    clickUseSamples = true;   // buffers always populated now (bank files or default beep)
 
     rebuildClickSchedule();
     clickPlayhead       = 0;
@@ -258,6 +295,14 @@ void AudioEngine::stopAll()
     clickPlayhead       = 0;
     clickCursor         = 0;
     clickVoiceRemaining = 0;
+}
+
+void AudioEngine::setLoop (bool enabled, double startSeconds, double endSeconds)
+{
+    const juce::ScopedLock sl (lock);
+    loopEnabled      = enabled;
+    loopStartSamples = (juce::int64) llround (juce::jmax (0.0, startSeconds) * currentSampleRate);
+    loopEndSamples   = (juce::int64) llround (juce::jmax (0.0, endSeconds)   * currentSampleRate);
 }
 
 bool AudioEngine::isPlaying() const
@@ -375,6 +420,34 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     const juce::ScopedLock sl (lock);
     currentNumOutputs = numOut;   // track the device's real output channel count
 
+    // Loop: if the playhead has reached the loop end, jump tracks + click back to
+    // the loop start before mixing this block. Block-granular (not sample-accurate),
+    // which is fine for a practice looper. Master clock = first transport, or the
+    // click playhead for a click-only song.
+    if (playing && loopEnabled && loopEndSamples > loopStartSamples)
+    {
+        juce::int64 masterPos = clickPlayhead;
+        for (auto* t : tracks)
+            if (t->transport != nullptr)
+                { masterPos = (juce::int64) llround (t->transport->getCurrentPosition() * currentSampleRate); break; }
+
+        if (masterPos >= loopEndSamples)
+        {
+            const double startSec = loopStartSamples / currentSampleRate;
+            for (auto* t : tracks)
+                if (t->transport != nullptr)
+                    t->transport->setPosition (startSec);
+
+            clickPlayhead       = loopStartSamples;
+            clickVoiceRemaining = 0;
+            clickSampleBuf      = nullptr;
+            clickCursor         = 0;
+            while (clickCursor < clickSchedule.size()
+                   && clickSchedule[clickCursor].sample < clickPlayhead)
+                ++clickCursor;
+        }
+    }
+
     // Solo overrides mute: if any track is soloed, only soloed tracks are heard.
     bool anySolo = false;
     for (auto* t : tracks)
@@ -406,39 +479,48 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 
         t->level = view.getMagnitude (0, num) * t->gain;   // post-gain peak for the meter
 
-        // Route source channels into the chosen physical outputs, with gain.
-        const auto& dst = t->outChannels;
-        const int nDst  = (int) dst.size();
-        const float g   = t->gain;
+        // Route source channels into the chosen physical outputs, applying the
+        // global gain and the per-output gain for that destination.
+        const auto& dst   = t->outChannels;
+        const auto& oGain = t->outGains;
+        const int nDst    = (int) dst.size();
+        const float g     = t->gain;
 
         if (nDst == 0)
             continue;
 
-        auto addTo = [&] (int dstIdx, int srcIdx)
+        auto gainAt = [&] (int pos) -> float
         {
+            return g * (pos < (int) oGain.size() ? oGain[(size_t) pos] : 1.0f);
+        };
+
+        // dstPos = index into dst/oGain; srcIdx = source channel feeding it.
+        auto addTo = [&] (int dstPos, int srcIdx)
+        {
+            const int dstIdx = dst[(size_t) dstPos];
             if (juce::isPositiveAndBelow (dstIdx, numOut))
-                out->addFrom (dstIdx, start, view, srcIdx, 0, num, g);
+                out->addFrom (dstIdx, start, view, srcIdx, 0, num, gainAt (dstPos));
         };
 
         if (srcCh == 1)
         {
             // mono file -> feed every chosen output
-            for (int d : dst)
-                addTo (d, 0);
+            for (int i = 0; i < nDst; ++i)
+                addTo (i, 0);
         }
         else if (nDst == 1)
         {
             // stereo (or more) file -> single output: downmix to mono
             for (int s = 0; s < srcCh; ++s)
                 if (juce::isPositiveAndBelow (dst[0], numOut))
-                    out->addFrom (dst[0], start, view, s, 0, num, g / (float) srcCh);
+                    out->addFrom (dst[0], start, view, s, 0, num, gainAt (0) / (float) srcCh);
         }
         else
         {
             // map one-to-one up to the smaller count
             const int n = juce::jmin (srcCh, nDst);
             for (int i = 0; i < n; ++i)
-                addTo (dst[i], i);
+                addTo (i, i);
         }
     }
 

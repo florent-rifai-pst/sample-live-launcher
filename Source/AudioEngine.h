@@ -20,8 +20,9 @@ public:
         juce::String name;
         juce::File   file;
         int          srcChannels = 2;          // channels in the source file
-        std::vector<int> outChannels { 0, 1 }; // physical output indices (0-based)
-        float        gain = 1.0f;
+        std::vector<int>   outChannels { 0, 1 };   // physical output indices (0-based)
+        std::vector<float> outGains;               // per-output gain, aligned with outChannels
+        float        gain = 1.0f;               // global track gain
         bool         mute = false;
         bool         solo = false;
         float        level = 0.0f;             // last block peak (post-gain), 0 if silent
@@ -46,6 +47,7 @@ public:
     void clear();
 
     void setTrackChannels (int index, std::vector<int> channels);
+    void setTrackChannelGains (int index, std::vector<float> gains);
     void setTrackGain (int index, float gain);
     void setTrackMute (int index, bool mute);
     void setTrackSolo (int index, bool solo);
@@ -60,6 +62,10 @@ public:
     void pauseAll();                            // stop transports, keep position
     void stopAll();
     bool isPlaying() const;
+
+    // Loop a time region [startSeconds, endSeconds). When playback reaches the end
+    // it jumps back to the start (tracks + click together). Disable to play through.
+    void setLoop (bool enabled, double startSeconds = 0.0, double endSeconds = 0.0);
 
     //== transport position (seconds) =========================================
     double getLengthSeconds() const;            // longest track
@@ -85,6 +91,7 @@ private:
     void rebuildClickSchedule();                // (re)build beat times at current sample rate
     void triggerClickVoice (bool accent);       // start a tone or sample for this beat
     void loadClickSample (const juce::File&, juce::AudioBuffer<float>& dest, double& destRate);
+    void makeDefaultClick (juce::AudioBuffer<float>& dest, bool accent);   // synth fallback sample
 
     juce::AudioFormatManager* formatManager = nullptr;
     juce::OwnedArray<Track>   tracks;
@@ -101,6 +108,12 @@ private:
     // flips it (instant, all tracks together) instead of calling the blocking
     // AudioTransportSource::stop(), which busy-waits ~1s per track on this thread.
     bool                      playing = false;
+
+    // Loop region (device-clock samples). When playing and loopEnd > loopStart,
+    // the audio thread reseeks to loopStart as soon as the playhead passes loopEnd.
+    bool                      loopEnabled     = false;
+    juce::int64               loopStartSamples = 0;
+    juce::int64               loopEndSamples   = 0;
 
     ClickTrack                clickConfig;       // current song's click settings
     std::vector<BeatEvent>    clickSchedule;     // beat onsets (in samples) for the song

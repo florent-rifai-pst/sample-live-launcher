@@ -52,6 +52,7 @@ public:
 
     void setClickTrack (ClickTrack* click);   // nullptr = no song selected
     void setSoundBanks (const std::vector<ClickSoundBank>& banks);   // fill the bank picker
+    void setExpanded (bool e);                // open/close the collapsible part
     int  preferredHeight() const;
 
     void resized() override;
@@ -66,9 +67,13 @@ private:
     void notify();                            // segment/header edited
     void refreshBankSelection();              // sync combo to click->soundBankId
 
+    void applyExpandedState();                // show/hide the collapsible part
+
     ClickTrack* click = nullptr;
     juce::StringArray bankIds;                // combo item id (index+2) -> bank id
+    bool expanded = false;                    // collapsed by default
 
+    juce::TextButton   disclosure;            // ▸ / ▾ collapse toggle
     juce::ToggleButton enableToggle { "Click" };
     juce::Label        chanCaption  { {}, "Sorties:" };
     juce::TextEditor   chanEditor;

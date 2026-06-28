@@ -118,6 +118,15 @@ void ClickSegmentRow::resized()
 //==============================================================================
 ClickTrackPanel::ClickTrackPanel()
 {
+    addAndMakeVisible (disclosure);
+    disclosure.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    disclosure.setTooltip ("D\xc3\xa9plier / replier"_t);
+    disclosure.onClick = [this]
+    {
+        expanded = ! expanded;
+        applyExpandedState();
+    };
+
     addAndMakeVisible (enableToggle);
     enableToggle.onClick = [this]
     {
@@ -175,6 +184,8 @@ ClickTrackPanel::ClickTrackPanel()
 
     addAndMakeVisible (addSegBtn);
     addSegBtn.onClick = [this] { addSegment(); };
+
+    applyExpandedState();   // start collapsed
 }
 
 void ClickTrackPanel::setSoundBanks (const std::vector<ClickSoundBank>& banks)
@@ -238,6 +249,28 @@ void ClickTrackPanel::notify()
         onChange();
 }
 
+void ClickTrackPanel::setExpanded (bool e)
+{
+    expanded = e;
+    applyExpandedState();
+}
+
+// Shows/hides the collapsible part (bank picker, sections, + button).
+void ClickTrackPanel::applyExpandedState()
+{
+    disclosure.setButtonText (expanded ? juce::String::fromUTF8 ("\xe2\x96\xbe")    // ▾
+                                       : juce::String::fromUTF8 ("\xe2\x96\xb8"));   // ▸
+    bankCaption.setVisible (expanded);
+    bankCombo  .setVisible (expanded);
+    addSegBtn  .setVisible (expanded);
+    for (auto* r : rows)
+        r->setVisible (expanded);
+
+    if (onHeightChanged)
+        onHeightChanged();
+    resized();
+}
+
 void ClickTrackPanel::addSegment()
 {
     if (click == nullptr)
@@ -264,36 +297,44 @@ void ClickTrackPanel::rebuildRows()
 
     if (click != nullptr)
     {
+        int idx = 0;
         for (auto& seg : click->segments)
         {
             auto* row = new ClickSegmentRow();
             row->bind (&seg);
             row->onChanged = [this] { notify(); };
-            row->onRemove  = [this, &seg]
+            // Defer the erase: rebuildRows() deletes this row (and the button firing
+            // this callback), so doing it inline is a use-after-free.
+            row->onRemove  = [this, idx]
             {
-                if (click == nullptr)
-                    return;
-                auto& segs = click->segments;
-                const auto idx = (int) (&seg - segs.data());
-                if (juce::isPositiveAndBelow (idx, (int) segs.size()))
+                juce::Component::SafePointer<ClickTrackPanel> self (this);
+                juce::MessageManager::callAsync ([self, idx]
                 {
-                    segs.erase (segs.begin() + idx);
-                    rebuildRows();
-                    notify();
-                }
+                    if (self == nullptr || self->click == nullptr)
+                        return;
+                    auto& segs = self->click->segments;
+                    if (juce::isPositiveAndBelow (idx, (int) segs.size()))
+                    {
+                        segs.erase (segs.begin() + idx);
+                        self->rebuildRows();
+                        self->notify();
+                    }
+                });
             };
             rows.add (row);
             addAndMakeVisible (row);
+            ++idx;
         }
     }
 
-    if (onHeightChanged)
-        onHeightChanged();   // height changed -> let the host re-lay the track list
-    resized();
+    applyExpandedState();   // respect collapsed/expanded + re-lay out the host
 }
 
 int ClickTrackPanel::preferredHeight() const
 {
+    if (! expanded)
+        return 6 + 28 + 6;                            // just the controls row
+
     const int header = 28 + 4 + 26;                   // controls row + bank row
     const int body   = (int) rows.size() * 32 + 36;   // rows + add button
     return header + 6 + body + 6;
@@ -312,6 +353,8 @@ void ClickTrackPanel::resized()
     auto area = getLocalBounds().reduced (8, 6);
 
     auto header = area.removeFromTop (28);
+    disclosure.setBounds (header.removeFromLeft (26));
+    header.removeFromLeft (4);
     enableToggle.setBounds (header.removeFromLeft (80));
     header.removeFromLeft (10);
     chanCaption.setBounds (header.removeFromLeft (60));
@@ -319,6 +362,9 @@ void ClickTrackPanel::resized()
     header.removeFromLeft (16);
     gainCaption.setBounds (header.removeFromLeft (40));
     gainSlider .setBounds (header.removeFromLeft (180));
+
+    if (! expanded)
+        return;                              // collapsed: nothing else is laid out
 
     area.removeFromTop (4);
 

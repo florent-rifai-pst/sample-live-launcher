@@ -85,7 +85,7 @@ juce::String TrackRow::channelsToText (const std::vector<int>& chans0Based)
 
 //==============================================================================
 TrackRow::TrackRow (const juce::String& name, const std::vector<int>& outChannels0Based,
-                    float gain, bool mute, bool solo)
+                    const std::vector<float>& outGains, float gain, bool mute, bool solo)
 {
     addAndMakeVisible (gripLabel);
     gripLabel.setJustificationType (juce::Justification::centred);
@@ -97,8 +97,13 @@ TrackRow::TrackRow (const juce::String& name, const std::vector<int>& outChannel
     addAndMakeVisible (nameLabel);
     nameLabel.setText (name, juce::dontSendNotification);
     nameLabel.setJustificationType (juce::Justification::centredLeft);
+    nameLabel.setTooltip ("Cliquer pour r\xc3\xa9gler le volume par sortie"_t);
+    nameLabel.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    nameLabel.addMouseListener (this, false);   // click toggles the per-output panel
 
-    channels = outChannels0Based;
+    channels     = outChannels0Based;
+    channelGains = outGains;
+    channelGains.resize (channels.size(), 1.0f);
     addAndMakeVisible (chanButton);
     chanButton.setTooltip ("Choisir les sorties physiques"_t);
     chanButton.onClick = [this] { openOutputSelector(); };
@@ -127,10 +132,11 @@ TrackRow::TrackRow (const juce::String& name, const std::vector<int>& outChannel
     };
 
     addAndMakeVisible (gainSlider);
-    gainSlider.setRange (0.0, 1.5, 0.01);
+    gainSlider.setRange (0.0, 3.0, 0.01);
     gainSlider.setValue (gain, juce::dontSendNotification);
     gainSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     gainSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, 20);
+    gainSlider.setTooltip ("Volume global (0..3)"_t);
     gainSlider.onValueChange = [this]
     {
         if (onGainChanged)
@@ -139,6 +145,56 @@ TrackRow::TrackRow (const juce::String& name, const std::vector<int>& outChannel
 
     addAndMakeVisible (removeButton);
     removeButton.onClick = [this] { if (onRemove) onRemove (this); };
+
+    rebuildOutputGainRows();
+}
+
+//==============================================================================
+// One "Sortie N" label + volume slider per assigned output (shown when expanded).
+void TrackRow::rebuildOutputGainRows()
+{
+    outGainLabels.clear();
+    outGainSliders.clear();
+
+    for (size_t i = 0; i < channels.size(); ++i)
+    {
+        auto* lab = outGainLabels.add (new juce::Label ({}, "Sortie "_t + juce::String (channels[i] + 1)));
+        lab->setJustificationType (juce::Justification::centredRight);
+        lab->setColour (juce::Label::textColourId, juce::Colours::white.withAlpha (0.8f));
+        addChildComponent (lab);
+        lab->setVisible (expanded);
+
+        auto* sl = outGainSliders.add (new juce::Slider (juce::Slider::LinearHorizontal,
+                                                         juce::Slider::TextBoxRight));
+        sl->setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, 20);
+        sl->setRange (0.0, 3.0, 0.01);
+        sl->setValue (i < channelGains.size() ? channelGains[i] : 1.0, juce::dontSendNotification);
+        const int pos = (int) i;
+        sl->onValueChange = [this, pos]
+        {
+            if (pos < (int) channelGains.size())
+                channelGains[(size_t) pos] = (float) outGainSliders[pos]->getValue();
+            if (onChannelGainsChanged)
+                onChannelGainsChanged (this, channelGains);
+        };
+        addChildComponent (sl);
+        sl->setVisible (expanded);
+    }
+}
+
+int TrackRow::getPreferredHeight() const
+{
+    return headerH + (expanded ? (int) channels.size() * subRowH + 8 : 0);
+}
+
+void TrackRow::toggleExpanded()
+{
+    expanded = ! expanded;
+    for (auto* l : outGainLabels)  l->setVisible (expanded);
+    for (auto* s : outGainSliders) s->setVisible (expanded);
+    if (onLayoutChanged)
+        onLayoutChanged();
+    resized();
 }
 
 void TrackRow::updateChanButtonText()
@@ -152,10 +208,25 @@ void TrackRow::openOutputSelector()
     auto content = std::make_unique<OutputSelector> (numOutputs, channels,
         [this] (std::vector<int> sel)
         {
-            channels = std::move (sel);
+            // Remap per-output gains: keep each kept output's gain, default new ones to 1.
+            std::vector<float> newGains (sel.size(), 1.0f);
+            for (size_t i = 0; i < sel.size(); ++i)
+                for (size_t j = 0; j < channels.size(); ++j)
+                    if (channels[j] == sel[i] && j < channelGains.size())
+                        { newGains[i] = channelGains[j]; break; }
+
+            channels     = std::move (sel);
+            channelGains = std::move (newGains);
             updateChanButtonText();
+            rebuildOutputGainRows();
+
             if (onChannelsChanged)
                 onChannelsChanged (this, channels);
+            if (onChannelGainsChanged)
+                onChannelGainsChanged (this, channelGains);
+            if (onLayoutChanged)
+                onLayoutChanged();       // per-output row count may have changed
+            resized();
         });
 
     juce::CallOutBox::launchAsynchronously (std::move (content),
@@ -173,6 +244,12 @@ void TrackRow::mouseDrag (const juce::MouseEvent& e)
     if (auto* container = juce::DragAndDropContainer::findParentDragContainerFor (this))
         if (! container->isDragAndDropActive())
             container->startDragging (index, this);
+}
+
+void TrackRow::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.eventComponent == &nameLabel)   // click the name -> open/close per-output panel
+        toggleExpanded();
 }
 
 bool TrackRow::isInterestedInDragSource (const SourceDetails& d)
@@ -234,7 +311,9 @@ void TrackRow::paint (juce::Graphics& g)
 
 void TrackRow::resized()
 {
-    auto r = getLocalBounds().reduced (6, 4);
+    auto full = getLocalBounds();
+    auto r = full.removeFromTop (headerH).reduced (6, 4);
+
     gripLabel.setBounds (r.removeFromLeft (22));
     r.removeFromLeft (4);
     removeButton.setBounds (r.removeFromRight (32));
@@ -251,6 +330,19 @@ void TrackRow::resized()
     meterBounds = r.removeFromBottom (6).reduced (0, 1);
     r.removeFromBottom (2);
     nameLabel.setBounds (r);
+
+    // Per-output volume rows (visible only when expanded).
+    if (expanded)
+    {
+        full.removeFromTop (2);
+        for (int i = 0; i < outGainSliders.size(); ++i)
+        {
+            auto row = full.removeFromTop (subRowH).reduced (28, 2);
+            outGainLabels[i]->setBounds (row.removeFromLeft (90));
+            row.removeFromLeft (8);
+            outGainSliders[i]->setBounds (row.removeFromLeft (260));
+        }
+    }
 }
 
 void TrackRow::setLevel (float linearPeak)

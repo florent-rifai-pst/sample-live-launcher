@@ -24,6 +24,7 @@ target_sources(SampleLiveLauncher PRIVATE
     Source/ClickTrackPanel.cpp
     Source/SoundBankView.cpp
     Source/SongsView.cpp
+    Source/SequencerView.cpp
     Source/SetlistsView.cpp
     Source/LiveView.cpp)
 

@@ -14,6 +14,11 @@ namespace
             ch.add (c);
         o->setProperty ("channels", ch);
 
+        juce::Array<juce::var> cg;
+        for (float g : t.channelGains)
+            cg.add (g);
+        o->setProperty ("channelGains", cg);
+
         o->setProperty ("gain", t.gain);
         o->setProperty ("mute", t.mute);
         o->setProperty ("solo", t.solo);
@@ -101,6 +106,13 @@ namespace
 
         if (t.channels.empty())
             t.channels = { 0, 1 };
+
+        t.channelGains.clear();
+        if (auto* arr = v.getProperty ("channelGains", juce::var()).getArray())
+            for (auto& g : *arr)
+                t.channelGains.push_back ((float) (double) g);
+
+        t.channelGains.resize (t.channels.size(), 1.0f);   // keep aligned, default 1.0
 
         return t;
     }
@@ -301,6 +313,36 @@ double clickTrackDurationSeconds (const ClickTrack& click)
         total += bars * s.numerator * beat;
     }
     return total;
+}
+
+std::vector<double> clickBarBoundaries (const ClickTrack& click)
+{
+    std::vector<double> bounds { 0.0 };
+
+    auto segs = click.segments;
+    std::sort (segs.begin(), segs.end(),
+               [] (const ClickSegment& a, const ClickSegment& b) { return a.barFrom < b.barFrom; });
+
+    double t = 0.0;
+    for (auto& s : segs)
+    {
+        if (s.bpm <= 0.0 || s.numerator <= 0)
+            continue;
+
+        const int    bars   = juce::jmax (0, s.barTo - s.barFrom + 1);
+        const double barDur  = s.numerator * (60.0 / s.bpm);   // bpm counts the denominator unit
+        for (int i = 0; i < bars; ++i)
+        {
+            t += barDur;
+            bounds.push_back (t);
+        }
+    }
+    return bounds;
+}
+
+int clickTotalBars (const ClickTrack& click)
+{
+    return juce::jmax (0, (int) clickBarBoundaries (click).size() - 1);
 }
 
 double songDurationSeconds (Song& song)
